@@ -1,5 +1,5 @@
 
-name: Build Android APK from ZIP
+name: Build Android APK
 
 on:
   workflow_dispatch:
@@ -13,63 +13,74 @@ permissions:
 
 jobs:
   build:
+    name: Build APK
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Get repository files
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and extract ZIP
+      # 2. Find and extract ZIP
+      - name: Extract Android project
         run: |
           ZIP=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP" ]; then
-            echo "No ZIP file found in repository root!"
+            echo "ERROR: No ZIP found!"
             exit 1
           fi
 
-          echo "Found: $ZIP"
-          mkdir extracted
+          echo "Extracting $ZIP"
+          mkdir -p extracted
           unzip -q "$ZIP" -d extracted
 
-      - name: Locate Android project
+      # 3. Locate Gradle project root
+      - name: Locate project
         run: |
-          PROJECT=$(find extracted -type f \
-            \( -name "gradlew" -o -name "build.gradle" -o -name "build.gradle.kts" \) \
+          SETTINGS=$(find extracted -type f \
+            \( -name "settings.gradle" -o -name "settings.gradle.kts" \) \
             | head -n 1)
 
-          if [ -z "$PROJECT" ]; then
-            echo "No Gradle build files found!"
+          if [ -z "$SETTINGS" ]; then
+            echo "ERROR: Gradle settings file not found!"
             exit 1
           fi
 
-          if [ "$(basename "$PROJECT")" = "gradlew" ]; then
-            DIR=$(dirname "$PROJECT")
-          else
-            DIR=$(dirname "$PROJECT")
-          fi
+          PROJECT_DIR=$(dirname "$SETTINGS")
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "PROJECT_DIR=$DIR" >> $GITHUB_ENV
-          echo "Project found at $DIR"
+          echo "Project: $PROJECT_DIR"
 
+      # 4. Install Java
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      
+      # 5. Install Android SDK
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          cmdline-tools-version: latest
-          packages: |
-            platform-tools
-            platforms;android-35
-            build-tools;35.0.0
-            
 
-      - name: Build APK
+      # 6. Install SDK packages separately
+      - name: Install Android packages
+        run: |
+          yes | sdkmanager --licenses || true
+
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      # 7. Set up Gradle
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      # 8. Compile APK
+      - name: Build Debug APK
         run: |
           cd "$PROJECT_DIR"
 
@@ -77,13 +88,15 @@ jobs:
             chmod +x gradlew
             ./gradlew assembleDebug
           else
-            echo "Gradle wrapper missing. Using installed Gradle."
             gradle assembleDebug
           fi
 
+      # 9. Upload APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Android-APK
-          path: extracted/**/build/outputs/apk/**/*.apk
+          name: PrismKeyboard-APK
+          path: extracted/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          retention-days: 14
+          
