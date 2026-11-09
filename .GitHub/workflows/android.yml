@@ -1,46 +1,82 @@
 
-name: Build Prism Keyboard APK
+name: Build Android APK from ZIP
 
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    paths:
+      - '*.zip'
+      - '.github/workflows/android.yml'
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up JDK
+      - name: Find and extract ZIP
+        run: |
+          ZIP=$(find . -maxdepth 1 -type f -iname "*.zip" | head -n 1)
+
+          if [ -z "$ZIP" ]; then
+            echo "No ZIP file found in repository root!"
+            exit 1
+          fi
+
+          echo "Found: $ZIP"
+          mkdir extracted
+          unzip -q "$ZIP" -d extracted
+
+      - name: Locate Android project
+        run: |
+          PROJECT=$(find extracted -type f \
+            \( -name "gradlew" -o -name "build.gradle" -o -name "build.gradle.kts" \) \
+            | head -n 1)
+
+          if [ -z "$PROJECT" ]; then
+            echo "No Gradle build files found!"
+            exit 1
+          fi
+
+          if [ "$(basename "$PROJECT")" = "gradlew" ]; then
+            DIR=$(dirname "$PROJECT")
+          else
+            DIR=$(dirname "$PROJECT")
+          fi
+
+          echo "PROJECT_DIR=$DIR" >> $GITHUB_ENV
+          echo "Project found at $DIR"
+
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Grant execute permission
-        run: chmod +x gradlew
+      - name: Build APK
+        run: |
+          cd "$PROJECT_DIR"
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew assembleDebug
+          else
+            echo "Gradle wrapper missing. Using installed Gradle."
+            gradle assembleDebug
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: PrismKeyboard-debug-apk
-          path: app/build/outputs/apk/debug/*.apk
+          name: Android-APK
+          path: extracted/**/build/outputs/apk/**/*.apk
           if-no-files-found: error
           
