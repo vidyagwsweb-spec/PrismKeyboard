@@ -60,8 +60,18 @@ jobs:
           java-version: '17'
 
       # 5. Install Android SDK
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Install Android SDK packages
+        run: |
+            echo "ANDROID_HOME=$ANDROID_HOME"
+            echo "SDK Manager:"
+            find "$ANDROID_HOME" -name sdkmanager -type f
+
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
       # 6. Install SDK packages separately
       - name: Install Android packages
