@@ -1,0 +1,165 @@
+name: Build APK
+
+# Drop this at .github/workflows/build-apk.yml and push.
+#
+# Works in either layout, so you never have to unzip by hand:
+#   1. the repo holds krama-android.zip   -> it unpacks and builds that
+#   2. the repo holds the extracted project -> it builds it directly
+#
+# Either way the Actions tab gives you a krama-debug-apk artifact.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: 'Path to the project zip (leave blank to auto-detect)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: krama-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  JAVA_VERSION: '17'
+  GRADLE_VERSION: '8.7'
+
+jobs:
+  build:
+    name: Compile and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ------------------------------------------------------------------ unpack
+      - name: Locate the project
+        id: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE"
+          WORK="$ROOT/.build-src"
+          mkdir -p "$WORK"
+
+          # 1. already a Gradle source tree?
+          EXISTING="$(find "$ROOT" -maxdepth 3 -name settings.gradle.kts -not -path "*/.build-src/*" | head -n 1 || true)"
+
+          if [ -n "$EXISTING" ]; then
+            SRC="$(dirname "$EXISTING")"
+            echo "Found a source tree at $SRC"
+          else
+            # 2. otherwise find a zip and unpack it
+            INPUT_ZIP="${{ github.event.inputs.zip_path }}"
+            if [ -n "${INPUT_ZIP:-}" ]; then
+              ZIP="$INPUT_ZIP"
+            else
+              ZIP="$(find "$ROOT" -maxdepth 2 -name '*.zip' -not -path "*/.build-src/*" | head -n 1 || true)"
+            fi
+            if [ -z "${ZIP:-}" ]; then
+              echo "::error::Neither settings.gradle.kts nor a .zip file was found."
+              exit 1
+            fi
+            echo "Unpacking $ZIP"
+            unzip -q -o "$ZIP" -d "$WORK"
+            SRC="$(dirname "$(find "$WORK" -name settings.gradle.kts | head -n 1 || true)")"
+          fi
+
+          if [ -z "${SRC:-}" ] || [ ! -f "$SRC/settings.gradle.kts" ]; then
+            echo "::error::Could not find settings.gradle.kts after unpacking."
+            exit 1
+          fi
+
+          echo "path=$SRC" >> "$GITHUB_OUTPUT"
+          echo "Project root: $SRC"
+          ls -la "$SRC"
+
+      # ------------------------------------------------------------------ toolchain
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+
+      - name: Set up Gradle ${{ env.GRADLE_VERSION }}
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
+      - name: Make sure the Android SDK has platform 34
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          SM="$(command -v sdkmanager || find "$SDK" -name sdkmanager -type f | head -n 1 || true)"
+          if [ -n "$SM" ]; then
+            yes | "$SM" --licenses >/dev/null 2>&1 || true
+            "$SM" "platforms;android-34" "build-tools;34.0.0" "platform-tools" >/dev/null 2>&1 \
+              || echo "::warning::sdkmanager could not add packages; using the image's SDK."
+          fi
+
+      # ------------------------------------------------------------------ build
+      - name: Unit tests
+        working-directory: ${{ steps.src.outputs.path }}
+        run: gradle test --no-daemon --stacktrace --console=plain
+
+      - name: Assemble debug APK
+        working-directory: ${{ steps.src.outputs.path }}
+        run: gradle assembleDebug --no-daemon --stacktrace --console=plain
+
+      # ------------------------------------------------------------------ collect
+      - name: Collect the APK
+        id: apk
+        working-directory: ${{ steps.src.outputs.path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find . -path '*/outputs/apk/debug/*.apk' | head -n 1 || true)"
+          if [ -z "$APK" ]; then
+            echo "::error::Gradle succeeded but no debug APK was produced."
+            exit 1
+          fi
+          NAME="krama-$(date +%Y%m%d)-$(git rev-parse --short HEAD 2>/dev/null || echo local).apk"
+          cp "$APK" "$GITHUB_WORKSPACE/$NAME"
+          echo "file=$NAME" >> "$GITHUB_OUTPUT"
+          ls -lh "$GITHUB_WORKSPACE/$NAME"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: krama-debug-apk
+          path: ${{ github.workspace }}/${{ steps.apk.outputs.file }}
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload reports when something fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports
+          path: |
+            ${{ steps.src.outputs.path }}/app/build/reports/**
+            ${{ steps.src.outputs.path }}/app/build/outputs/logs/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+  release:
+    name: Attach APK to a release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: krama-debug-apk
+          path: apk
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: apk/*.apk
+          generate_release_notes: true
